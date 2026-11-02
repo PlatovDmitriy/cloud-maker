@@ -1,0 +1,6 @@
+global:
+  scrape_interval: 5s
+scrape_configs:
+  - job_name: 'libvirt'
+    static_configs:
+      - targets: ['libvirt-exporter:9177']
