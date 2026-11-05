@@ -4,17 +4,25 @@ services:
     build: .
     ports:
       - "8000:8000"
+    pid: "host"
+    privileged: true
     volumes:
       - /var/run/libvirt/libvirt-sock:/var/run/libvirt/libvirt-sock
       - /var/lib/libvirt/images:/var/lib/libvirt/images
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
+      - /run:/run
+      - /dev/kvm:/dev/kvm
     restart: unless-stopped
 
   libvirt-exporter:
     image: ghcr.io/inovex/prometheus-libvirt-exporter:2.3.0
     ports:
       - "9177:9177"
+    pid: "host"
+    privileged: true
     volumes:
       - /var/run/libvirt/libvirt-sock:/var/run/libvirt/libvirt-sock
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
 
   prometheus:
     image: prom/prometheus:latest
