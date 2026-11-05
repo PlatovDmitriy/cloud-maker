@@ -1,7 +1,8 @@
 import libvirt
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import os
+import uuid
+import sqlite3
 
 app = FastAPI(title="Cloud Maker API")
 
@@ -11,10 +12,31 @@ def get_libvirt_conn():
     except libvirt.libvirtError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+def init_db():
+    conn = sqlite3.connect('cloud_state.db')
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS vms
+                 (name TEXT PRIMARY KEY, memory_mb INTEGER, vcpus INTEGER, status TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS images
+                 (name TEXT PRIMARY KEY, path TEXT, description TEXT)''')
+    conn.commit()
+    conn.close()
+
+init_db()
+
 class VMCreateRequest(BaseModel):
     name: str
     memory_mb: int = 1024
     vcpus: int = 1
+
+class ImageRequest(BaseModel):
+    name: str
+    path: str
+    description: str = ""
+
+class NetworkRequest(BaseModel):
+    name: str
+    bridge: str = "virbr0"
 
 @app.get("/api/v1/vms")
 def list_vms():
@@ -29,7 +51,6 @@ def list_vms():
 def create_vm(req: VMCreateRequest):
     conn = get_libvirt_conn()
     
-    # Фича 9: Проверка квот (лимит 16 ГБ RAM на хост)
     total_mem = sum(dom.info()[1] for dom in conn.listAllDomains()) // 1024
     if False: # total_mem + (req.memory_mb // 1024) > 64:
         conn.close()
@@ -37,7 +58,6 @@ def create_vm(req: VMCreateRequest):
 
     new_disk_name = f"{req.name}-disk.qcow2"
     
-    # Создаем новый диск для ВМ на основе базового образа
     try:
         conn.storagePoolLookupByName("default").createXML(f"""
             <volume>
@@ -52,11 +72,12 @@ def create_vm(req: VMCreateRequest):
             </volume>
         """, 0)
     except libvirt.libvirtError:
-        pass # Если диск уже есть (например, при восстановлении состояния), просто идем дальше
+        pass 
 
     xml = f"""
     <domain type='kvm'>
       <name>{req.name}</name>
+      <uuid>{uuid.uuid4()}</uuid>
       <memory unit='MiB'>{req.memory_mb}</memory>
       <vcpu>{req.vcpus}</vcpu>
       <os>
@@ -100,7 +121,6 @@ def delete_vm(name: str):
             dom.destroy()
         dom.undefine()
         
-        # Удаляем диск, чтобы не засорять память
         try:
             conn.storagePoolLookupByName("default").lookupVolumeByName(f"{name}-disk.qcow2").delete()
         except:
@@ -111,3 +131,32 @@ def delete_vm(name: str):
     except libvirt.libvirtError as e:
         conn.close()
         raise HTTPException(status_code=404, detail=str(e))
+
+@app.post("/api/v1/images")
+def register_image(req: ImageRequest):
+    conn = sqlite3.connect('cloud_state.db')
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO images (name, path, description) VALUES (?, ?, ?)", (req.name, req.path, req.description))
+    conn.commit()
+    conn.close()
+    return {"status": "created", "image": req.name}
+
+@app.post("/api/v1/networks")
+def create_network(req: NetworkRequest):
+    conn = get_libvirt_conn()
+    xml = f"""
+    <network>
+      <name>{req.name}</name>
+      <bridge name='{req.bridge}' stp='on' delay='0'/>
+      <forward mode='bridge'/>
+    </network>
+    """
+    try:
+        net = conn.networkDefineXML(xml)
+        net.setAutostart(True)
+        net.create()
+        conn.close()
+        return {"status": "created", "network": req.name}
+    except libvirt.libvirtError as e:
+        conn.close()
+        raise HTTPException(status_code=500, detail=str(e))
